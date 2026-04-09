@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?eclipse version="3.4"?>
+<plugin>
+   <extension point="org.eclipse.ui.popupMenus">
+      <objectContribution
+            objectClass="org.eclipse.core.resources.IFile"
+            nameFilter="*.bpmn2"
+            id="prices.vbpmn.transformer.contribution">
+         <action
+               label="Derive to BPMN"
+               class="prices.varbpmn.transformer.actions.DeriveAction"
+               menubarPath="additions"
+               enablesFor="1"
+               id="prices.varbpmn.transformer.action">
+         </action>
+      </objectContribution>
+   </extension>
+</plugin>

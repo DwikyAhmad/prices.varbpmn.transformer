@@ -19,10 +19,10 @@ helper context VBPMN!BaseElement def: hasExtensionKeyValue(key : String, value :
 	);
 
 helper context VBPMN!BaseElement def: isExcluded : Boolean =
-	self.hasExtensionKeyValue('presenceStatus', '2');
+	self.hasExtensionKeyValue('inclusionVariability', '2');
 
 helper context VBPMN!BaseElement def: isSkipped : Boolean =
-	self.hasExtensionKeyValue('presenceStatus', '3');
+	self.hasExtensionKeyValue('inclusionVariability', '3');
 
 helper context VBPMN!FlowElement def: isInExcludedContainer : Boolean =
 	if self.refImmediateComposite().oclIsUndefined() then
@@ -44,6 +44,97 @@ helper context VBPMN!FlowNode def: getNextValidTarget : VBPMN!FlowNode =
 			OclUndefined -- Safety check for dead ends
 		else
 			self.outgoing->first().targetRef.getNextValidTarget
+		endif
+	endif;
+
+-- Sequence flow is kept by derivation before post-revision simplification
+helper context VBPMN!SequenceFlow def: isDerivableFlow : Boolean =
+	not self.sourceRef.oclIsUndefined() and
+	not self.targetRef.oclIsUndefined() and
+	not self.isExcluded and
+	not self.isInExcludedContainer and
+	not self.sourceRef.isSkipped and
+	not self.sourceRef.isExcluded and
+	not self.targetRef.isExcluded;
+
+-- Effective target after connector/skip handling (pre revision)
+helper context VBPMN!SequenceFlow def: getBaseDerivedTarget : VBPMN!FlowNode =
+	if not self.sourceRef.getConnectorTargetNode.oclIsUndefined() then
+		self.sourceRef.getConnectorTargetNode
+	else
+		self.targetRef.getNextValidTarget
+	endif;
+
+helper context VBPMN!FlowNode def: isGatewayNode : Boolean =
+	self.oclIsKindOf(VBPMN!ExclusiveGateway) or
+	self.oclIsKindOf(VBPMN!ParallelGateway) or
+	self.oclIsKindOf(VBPMN!InclusiveGateway);
+
+-- Count incoming effective flows before gateway revision (explicit + connector-generated)
+helper context VBPMN!FlowNode def: getIncomingEffectiveFlowCount : Integer =
+	let incomingFromSequence : Integer = VBPMN!SequenceFlow.allInstancesFrom('IN')->select(sf |
+		sf.isDerivableFlow and
+		not sf.getBaseDerivedTarget.oclIsUndefined() and
+		sf.getBaseDerivedTarget = self
+	)->size() in
+	let incomingFromConnector : Integer = VBPMN!FlowNode.allInstancesFrom('IN')->select(fn |
+		fn.shouldGenerateConnectorFlow and
+		not fn.getConnectorTargetNode.oclIsUndefined() and
+		fn.getConnectorTargetNode = self
+	)->size() in
+	incomingFromSequence + incomingFromConnector;
+
+-- Count outgoing effective flows before gateway revision (explicit + connector-generated)
+helper context VBPMN!FlowNode def: getOutgoingEffectiveFlowCount : Integer =
+	let outgoingFromSequence : Integer = VBPMN!SequenceFlow.allInstancesFrom('IN')->select(sf |
+		sf.isDerivableFlow and
+		not sf.getBaseDerivedTarget.oclIsUndefined() and
+		sf.sourceRef = self
+	)->size() in
+	let outgoingFromConnector : Integer =
+		if self.shouldGenerateConnectorFlow then 1 else 0 endif in
+	outgoingFromSequence + outgoingFromConnector;
+
+-- Gateway revision candidate: exactly one incoming and one outgoing effective flow
+helper context VBPMN!FlowNode def: isSinglePathGateway : Boolean =
+	self.isGatewayNode and
+	not self.isExcluded and
+	not self.isSkipped and
+	not self.isInExcludedContainer and
+	self.getIncomingEffectiveFlowCount = 1 and
+	self.getOutgoingEffectiveFlowCount = 1;
+
+-- Resolve single outgoing effective target (explicit flow or connector-generated flow)
+helper context VBPMN!FlowNode def: getSingleOutgoingEffectiveTarget : VBPMN!FlowNode =
+	if self.shouldGenerateConnectorFlow then
+		self.getConnectorTargetNode
+	else
+		let gatewayOut : VBPMN!SequenceFlow = VBPMN!SequenceFlow.allInstancesFrom('IN')->select(sf |
+			sf.isDerivableFlow and
+			not sf.getBaseDerivedTarget.oclIsUndefined() and
+			sf.sourceRef = self
+		)->first() in
+		if gatewayOut.oclIsUndefined() then
+			OclUndefined
+		else
+			gatewayOut.getBaseDerivedTarget
+		endif
+	endif;
+
+-- Post-derivation revision: bypass single-path gateways recursively
+helper context VBPMN!FlowNode def: getRevisedTarget : VBPMN!FlowNode =
+	if self.oclIsUndefined() then
+		OclUndefined
+	else
+		if self.isSinglePathGateway then
+			let nextTarget : VBPMN!FlowNode = self.getSingleOutgoingEffectiveTarget in
+			if nextTarget.oclIsUndefined() then
+				self
+			else
+				nextTarget.getRevisedTarget
+			endif
+		else
+			self
 		endif
 	endif;
 
@@ -155,68 +246,38 @@ helper context VBPMN!FlowNode def: acceptsConnector(connectorName : String) : Bo
 
 -- Resolve connector target by connector@select and validate receiver option by connector@name
 helper context VBPMN!FlowNode def: getConnectorTargetNode : VBPMN!FlowNode =
-	let hasConn : Boolean = self.hasConnector in
-	let _dbg0 : Boolean = true.debug('TGT src=' + self.id + ' hasConnector=' + hasConn.toString()) = true in
-	if not hasConn then
-		let _dbgNoConn : Boolean = true.debug('TGT src=' + self.id + ' result=UNDEF (no connector)') = true in
+	if not self.hasConnector then
 		OclUndefined
 	else
 		let selectedTargetId : String = self.getConnectorSelectId in
 		let connectorName : String = self.getConnectorName in
-		let _dbg1 : Boolean = true.debug('TGT src=' + self.id + ' selectId=' + selectedTargetId + ' connectorName=' + connectorName) = true in
 		if selectedTargetId = '' or connectorName = '' then
-			let _dbgEmpty : Boolean = true.debug('TGT src=' + self.id + ' result=UNDEF (empty select/name)') = true in
 			OclUndefined
 		else
-			let target : VBPMN!FlowNode = VBPMN!FlowNode.allInstances()->select(fn |
-				let idMatch : Boolean = fn.id = selectedTargetId in
-				let receiverOk : Boolean = fn.acceptsConnector(connectorName) in
-				let notExcluded : Boolean = not fn.isExcluded in
-				let notSkipped : Boolean = not fn.isSkipped in
-				let notInExcludedContainer : Boolean = not fn.isInExcludedContainer in
-				let pass : Boolean = idMatch and receiverOk and notExcluded and notSkipped and notInExcludedContainer in
-				let _dbgCand : Boolean = true.debug(
-					'TGT src=' + self.id +
-					' cand=' + fn.id +
-					' idMatch=' + idMatch.toString() +
-					' receiverOk=' + receiverOk.toString() +
-					' notExcluded=' + notExcluded.toString() +
-					' notSkipped=' + notSkipped.toString() +
-					' notInExcludedContainer=' + notInExcludedContainer.toString() +
-					' pass=' + pass.toString()
-				) = true in
-				pass
-			)->first() in
-			let _dbgRes : Boolean = true.debug('TGT src=' + self.id + ' result=' + (if target.oclIsUndefined() then 'UNDEF' else target.id endif)) = true in
-			target
+			VBPMN!FlowNode.allInstancesFrom('IN')->select(fn |
+				fn.id = selectedTargetId and
+				fn.acceptsConnector(connectorName) and
+				not fn.isExcluded and
+				not fn.isSkipped and
+				not fn.isInExcludedContainer
+			)->first()
 		endif
 	endif;
 
 -- Build new sequence flow from connector metadata when no explicit outgoing sequence flow exists
 helper context VBPMN!FlowNode def: shouldGenerateConnectorFlow : Boolean =
-	let hasConn : Boolean = self.hasConnector in
-	let _dbg1 : Boolean = true.debug('CHK node=' + self.id + ' hasConnector=' + hasConn.toString()) = true in
-	let notExcluded : Boolean = not self.isExcluded in
-	let _dbg2 : Boolean = true.debug('CHK node=' + self.id + ' notExcluded=' + notExcluded.toString()) = true in
-	let notSkipped : Boolean = not self.isSkipped in
-	let _dbg3 : Boolean = true.debug('CHK node=' + self.id + ' notSkipped=' + notSkipped.toString()) = true in
-	let notInExcludedContainer : Boolean = not self.isInExcludedContainer in
-	let _dbg4 : Boolean = true.debug('CHK node=' + self.id + ' notInExcludedContainer=' + notInExcludedContainer.toString()) = true in
-	let hasTarget : Boolean = not self.getConnectorTargetNode.oclIsUndefined() in
-	let _dbg5 : Boolean = true.debug('CHK node=' + self.id + ' hasTarget=' + hasTarget.toString()) = true in
-	let noOutgoing : Boolean = self.outgoing->isEmpty() in
-	let _dbg6 : Boolean = true.debug('CHK node=' + self.id + ' noOutgoing=' + noOutgoing.toString()) = true in
-	let result : Boolean = hasConn and notExcluded and notSkipped and notInExcludedContainer and hasTarget and noOutgoing in
-	let _dbg7 : Boolean = true.debug('CHK node=' + self.id + ' RESULT=' + result.toString()) = true in
-	result;
+	self.hasConnector and
+	not self.isExcluded and
+	not self.isSkipped and
+	not self.isInExcludedContainer and
+	not self.getConnectorTargetNode.oclIsUndefined() and
+	self.outgoing->isEmpty();
 
 -- Collect generated connector-driven sequence flows for a process
 helper context VBPMN!Process def: generatedConnectorFlows : Sequence(BPMN!SequenceFlow) =
-	VBPMN!FlowNode.allInstances()
+	VBPMN!FlowNode.allInstancesFrom('IN')
 		->select(fn | fn.refImmediateComposite() = self)
-		->select(fn | true.debug('INSTANCE_ALL=' + fn.toString()) = true)
-		->select(fn | fn.shouldGenerateConnectorFlow)
-		->select(fn | true.debug('INSTANCE_PASS=' + fn.toString()) = true)
+		->select(fn | fn.shouldGenerateConnectorFlow and not fn.isSinglePathGateway)
 		->collect(fn | thisModule.ConnectorSequenceFlow(fn));
 
 -- Transform Definitions (root container)
@@ -244,21 +305,24 @@ rule Process {
 }
 
 unique lazy rule ConnectorSequenceFlow {
-	from s : VBPMN!FlowNode (s.shouldGenerateConnectorFlow)
+	from s : VBPMN!FlowNode (
+		s.shouldGenerateConnectorFlow and
+		not s.isSinglePathGateway and
+		not s.getConnectorTargetNode.getRevisedTarget.oclIsUndefined()
+	)
 	to t : BPMN!SequenceFlow (
 		id <- 'SF_CONN_' + s.id + '_' + s.getConnectorName,
 		sourceRef <- s,
-		targetRef <- s.getConnectorTargetNode
+		targetRef <- s.getConnectorTargetNode.getRevisedTarget
 	)
 }
 
 rule ReconnectSequenceFlow {
 	from
 		s : VBPMN!SequenceFlow (
-			not s.isExcluded and
-			not s.sourceRef.isExcluded and
-			not s.isInExcludedContainer and
-			not s.targetRef.isExcluded
+			s.isDerivableFlow and
+			not s.sourceRef.isSinglePathGateway and
+			not s.getBaseDerivedTarget.oclIsUndefined()
 		)
 	to
 		t : BPMN!SequenceFlow (
@@ -267,14 +331,8 @@ rule ReconnectSequenceFlow {
 			
 			sourceRef <- s.sourceRef,
 			
-			-- If source has connector to a receiver task, redirect to that task
-			-- Otherwise use the normal target (with skip handling)
-			targetRef <- 
-				if not s.sourceRef.getConnectorTargetNode.oclIsUndefined() then
-					s.sourceRef.getConnectorTargetNode
-				else
-					s.targetRef.getNextValidTarget
-				endif
+			-- Apply post-derivation gateway revision on top of base target resolution
+			targetRef <- s.getBaseDerivedTarget.getRevisedTarget
 		)	
 }
 
@@ -307,7 +365,8 @@ rule ExclusiveGateway {
 	from s : VBPMN!ExclusiveGateway (
 		not s.isExcluded and
 		not s.isInExcludedContainer and
-		not s.isSkipped
+		not s.isSkipped and
+		not s.isSinglePathGateway
 	)
 	to t : BPMN!ExclusiveGateway (
 		id <- s.id, name <- s.name
@@ -318,7 +377,8 @@ rule ParallelGateway {
 	from s : VBPMN!ParallelGateway (
 		not s.isExcluded and
 		not s.isInExcludedContainer and
-		not s.isSkipped
+		not s.isSkipped and
+		not s.isSinglePathGateway
 	)
 	to t : BPMN!ParallelGateway (
 		id <- s.id, name <- s.name
@@ -329,7 +389,8 @@ rule InclusiveGateway {
 	from s : VBPMN!InclusiveGateway (
 		not s.isExcluded and
 		not s.isInExcludedContainer and
-		not s.isSkipped
+		not s.isSkipped and
+		not s.isSinglePathGateway
 	)
 	to t : BPMN!InclusiveGateway (
 		id <- s.id, name <- s.name

@@ -115,10 +115,7 @@ public class DeriveAction implements IObjectActionDelegate {
 					return;
 				}
 
-				File mappingFile = resolveMappingFile(configFile);
-				if (mappingFile == null) {
-					mappingFile = askUserFile("Pilih File Mapping feature_to_var.json", new String[] { "*.json", "*.*" }, configFile.toPath().getParent());
-				}
+				File mappingFile = askUserFile("Pilih File Mapping feature_to_var.json", new String[] { "*.json", "*.*" }, configFile.toPath().getParent());
 				if (mappingFile == null) {
 					return;
 				}
@@ -142,12 +139,28 @@ public class DeriveAction implements IObjectActionDelegate {
 
 				Map<String, List<MappingEntry>> featureMappings = parseFeatureMappings(mappingFile.toPath());
 
-				String baseName = selectedFile.getName().substring(0, selectedFile.getName().length() - ".bpmn2".length());
-				Path generatedVarBpmnPath = baseFolder.resolve(baseName + "_generated.bpmn2");
-				Path derivedOutputPath = baseFolder.resolve(baseName + "_derived.bpmn2");
+				// Prompt for output file
+				FileDialog outDialog = new FileDialog(shell, SWT.SAVE);
+				outDialog.setText("Pilih Lokasi Output BPMN");
+				outDialog.setFilterExtensions(new String[] { "*.bpmn2", "*.*" });
+				outDialog.setFileName(selectedFile.getName().replace(".bpmn2", "_derived.bpmn2"));
+				if (baseFolder != null && Files.exists(baseFolder)) {
+					outDialog.setFilterPath(baseFolder.toAbsolutePath().toString());
+				}
+				String outputPathStr = outDialog.open();
+				if (outputPathStr == null || outputPathStr.trim().isEmpty()) {
+					return;
+				}
+				Path derivedOutputPath = Paths.get(outputPathStr);
 
-				annotateVariability(inputBpmnPath, generatedVarBpmnPath, selectedFeatures, featureMappings);
-				runAtlDerivation(generatedVarBpmnPath, derivedOutputPath);
+				// Use a temp file for varbpmn
+				Path tempVarBpmn = Files.createTempFile("varbpmn_", ".bpmn2");
+				try {
+					annotateVariability(inputBpmnPath, tempVarBpmn, selectedFeatures, featureMappings);
+					runAtlDerivation(tempVarBpmn, derivedOutputPath);
+				} finally {
+					try { Files.deleteIfExists(tempVarBpmn); } catch (Exception ignore) {}
+				}
 
 				selectedFile.getParent().refreshLocal(IResource.DEPTH_ONE, null);
 
@@ -156,7 +169,6 @@ public class DeriveAction implements IObjectActionDelegate {
 						+ "Config: " + configFile.getName() + "\n"
 						+ "Model: " + modelFile.getName() + "\n"
 						+ "Mapping: " + mappingFile.getName() + "\n\n"
-						+ "VarBPMN generated: " + generatedVarBpmnPath.getFileName() + "\n"
 						+ "BPMN variant: " + derivedOutputPath.getFileName());
 
 			} catch (Exception e) {
